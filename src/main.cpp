@@ -159,7 +159,9 @@ void reconnect() {
     Serial.println(client.state());
     
     // Attempt to connect
-    if (client.connect(device_name.c_str())) {
+    String client_id = device_name + "_";
+    client_id += String(random(0xffff), HEX);
+    if (client.connect(client_id.c_str())) {
       Serial.println("connected");
       
       String config = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\", \"name\": \"" + device_name + "\", \"unit_of_measurement\": \"W\"}";
