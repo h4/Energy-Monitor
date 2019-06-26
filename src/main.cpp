@@ -120,6 +120,8 @@ void writeSettingsESP() {
 void configModeCallback (WiFiManager *myWiFiManager) {
 }
 
+void mqttCallback(char* topic, byte* payload, unsigned int length) {}
+
 void setupWiFi() {
   WiFiManager wifiManager;
   // Debug mode on
@@ -148,30 +150,31 @@ void setupWiFi() {
   WiFi.enableAP(0);
 }
 
+
 void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
+    Serial.print(" Current state = ");
+    Serial.println(client.state());
     
     // Attempt to connect
     if (client.connect(device_name.c_str())) {
       Serial.println("connected");
       
       String config = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\", \"name\": \"" + device_name + "\", \"unit_of_measurement\": \"W\"}";
-      //String config = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\"}";
-
-      delay(300);
       
-      bool publised = client.publish(power_config_topic.c_str(), config.c_str());
-      if (!publised) {
-        Serial.println("Config not published");
-        Serial.println(2 + strlen(power_config_topic.c_str()));
-        Serial.println(strlen(config.c_str()));
-        Serial.println(power_config_topic);
+      bool published = client.publish(power_config_topic.c_str(), config.c_str());
+      if (published) {
+        Serial.println(config);
       }
-      
       String payload = "online";
-      client.publish(availability_topic.c_str(), payload.c_str());
+      published = client.publish(availability_topic.c_str(), payload.c_str());
+      if (published) {
+        Serial.println(payload);
+      } else {
+        Serial.println("Can't publish");
+      }
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -189,6 +192,7 @@ void setup() {
 
   int port = atoi(eeprom_data.mqtt_port);
   client.setServer(eeprom_data.mqtt_server, port);
+  client.setCallback(mqttCallback);
 
   Serial.begin(115200);
   
@@ -196,10 +200,14 @@ void setup() {
 }
 
 int samples = 0;
-bool dataLooksValid = false;
+bool lockSending = true;
+int publishInterval = 5 * 1000;
+int lastSend = 0;
+double samplesAcc;
+int samplesCount = 0;
 
 void loop() {
-  double Irms = emon1.calcIrms(1480);  // Calculate Irms only
+  double Irms = emon1.calcIrms(1480);
   double consumption = Irms * 234.0;
 
   if (!client.connected()) {
@@ -207,19 +215,39 @@ void loop() {
   }
   client.loop();
 
-  if (!dataLooksValid) {
+  if (lockSending) {
     samples += 1;
     if (samples > 5) {
-      dataLooksValid = true;
+      lockSending = false;
     }
 
     return;
   }
 
-  String payload = String(consumption);
-  client.publish(power_state_topic.c_str(), payload.c_str());
-  
-  Serial.print(Irms * 234.0);	       // Apparent power
-  Serial.print(" ");
-  Serial.println(Irms);		       // Irms
+  if (millis() - lastSend < publishInterval) {
+    samplesAcc += consumption;
+    samplesCount += 1;
+  } else {
+    lastSend = millis();
+
+    Serial.print(samplesAcc);	
+    Serial.print(" ");
+    Serial.println(samplesCount);
+    
+    String payload;
+    if (samplesCount > 0) {
+       payload = String(samplesAcc / samplesCount);
+    } else {
+      payload = "0";
+    }
+
+    bool published = client.publish(power_state_topic.c_str(), payload.c_str());
+    Serial.print("published: ");
+    Serial.println(published);
+
+    if (published) {
+      samplesAcc = 0;
+      samplesCount = 0;
+    }
+  }
 }
