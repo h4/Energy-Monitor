@@ -6,6 +6,7 @@
 #include <WiFiManager.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <ArduinoOTA.h>
 #include <EmonLib.h>             // Include Emon Library
 
 #undef  MQTT_MAX_PACKET_SIZE
@@ -17,11 +18,11 @@ EnergyMonitor emon1;                   // Create an instance
 
 boolean setEEPROM = false;
 uint32_t memcrc; uint8_t *p_memcrc = (uint8_t*)&memcrc;
+long lastReconnectAttempt = 0;
 
 struct eeprom_data_t {
   char mqtt_server[40];
   char mqtt_port[6];
-  char calibration[4];
 } eeprom_data;
 
 static  uint32_t crc_table[16] = {
@@ -92,7 +93,6 @@ int i;
   } else {
     strncpy(eeprom_data.mqtt_server, default_mqtt_server, sizeof(default_mqtt_server));
     strncpy(eeprom_data.mqtt_port, default_mqtt_port, sizeof(default_mqtt_port));
-    strncpy(eeprom_data.calibration, default_calibration, sizeof(default_calibration));
   }
 }
 
@@ -130,11 +130,9 @@ void setupWiFi() {
 
   WiFiManagerParameter custom_mqtt_server("server", "mqtt server", eeprom_data.mqtt_server, 40);
   WiFiManagerParameter custom_mqtt_port("port", "mqtt port", eeprom_data.mqtt_port, 6);
-  WiFiManagerParameter custom_calibration("calibration", "calibration", eeprom_data.calibration, 4);
 
   wifiManager.addParameter(&custom_mqtt_server);
   wifiManager.addParameter(&custom_mqtt_port);
-  wifiManager.addParameter(&custom_calibration);
 
   String ssid = "EnergyMeter_" + String(ESP.getChipId());
 
@@ -145,60 +143,94 @@ void setupWiFi() {
 
   strcpy(eeprom_data.mqtt_server, custom_mqtt_server.getValue());
   strcpy(eeprom_data.mqtt_port, custom_mqtt_port.getValue());
-  strcpy(eeprom_data.calibration, custom_calibration.getValue());
 
   WiFi.enableAP(0);
 }
 
+void setupOTA() {
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_FS
+      type = "filesystem";
+    }
 
-void reconnect() {
-  // Loop until we're reconnected
+    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+
+  ArduinoOTA.begin();
+}
+
+void setupMQTT() {
+  int port = atoi(eeprom_data.mqtt_port);
+  
+  Serial.print("Connnecting to ");
+  Serial.print(eeprom_data.mqtt_server);
+  Serial.println(":" + String(eeprom_data.mqtt_port) + " ...");
+  
+  IPAddress server(192, 168, 2, 100);
+  client.setServer("farmer.cloudmqtt.com", 18762);
+  client.setCallback(mqttCallback);
+}
+
+bool reconnect() {
   while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    Serial.print(" Current state = ");
-    Serial.println(client.state());
-    
-    // Attempt to connect
     String client_id = device_name + "_";
     client_id += String(random(0xffff), HEX);
-    if (client.connect(client_id.c_str())) {
-      Serial.println("connected");
-      
-      String config = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\", \"name\": \"" + device_name + "\", \"unit_of_measurement\": \"W\"}";
-      
-      bool published = client.publish(power_config_topic.c_str(), config.c_str());
-      if (published) {
-        Serial.println(config);
-      }
+
+    Serial.println("Reconnect as " + client_id);
+
+    if (client.connect(client_id.c_str(), "baoamsvm", "xw-PGPkL4Jw-")) {
+      //String config = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\", \"name\": \"" + device_name + "\", \"unit_of_measurement\": \"W\"}";
+      //client.publish(power_config_topic.c_str(), config.c_str());
       String payload = "online";
-      published = client.publish(availability_topic.c_str(), payload.c_str());
-      if (published) {
-        Serial.println(payload);
-      } else {
-        Serial.println("Can't publish");
-      }
+      client.publish(availability_topic.c_str(), payload.c_str());
+
+      Serial.println("Reconnected...");
     } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
       delay(5000);
     }
   }
+  Serial.println(client.state());
+  return client.connected();
 }
 
 void setup() {
+  Serial.begin(115200);
   readSettingsESP();
   setupWiFi();
   writeSettingsESP();
 
-  int port = atoi(eeprom_data.mqtt_port);
-  client.setServer(eeprom_data.mqtt_server, port);
-  client.setCallback(mqttCallback);
-
-  Serial.begin(115200);
+  setupMQTT();
+  // setupOTA();
   
-  emon1.current(A0, 26);             // Current: input pin, calibration.
+  emon1.current(A0, 10);             // Current: input pin, calibration.
+
+  Serial.println("Setup completed");
 }
 
 int samples = 0;
@@ -209,20 +241,20 @@ double samplesAcc;
 int samplesCount = 0;
 
 void loop() {
+  // ArduinoOTA.handle();
   double Irms = emon1.calcIrms(1480);
   double consumption = Irms * 234.0;
-
   if (!client.connected()) {
-    reconnect();
+      reconnect();
   }
   client.loop();
 
   if (lockSending) {
+    // Skip first five samples as unstable
     samples += 1;
     if (samples > 5) {
       lockSending = false;
     }
-
     return;
   }
 
@@ -230,12 +262,6 @@ void loop() {
     samplesAcc += consumption;
     samplesCount += 1;
   } else {
-    lastSend = millis();
-
-    Serial.print(samplesAcc);	
-    Serial.print(" ");
-    Serial.println(samplesCount);
-    
     String payload;
     if (samplesCount > 0) {
        payload = String(samplesAcc / samplesCount);
@@ -243,13 +269,15 @@ void loop() {
       payload = "0";
     }
 
-    bool published = client.publish(power_state_topic.c_str(), payload.c_str());
-    Serial.print("published: ");
-    Serial.println(published);
+    if (client.connected()) {
+      bool published = client.publish(power_state_topic.c_str(), payload.c_str());
+      Serial.println(published);
 
-    if (published) {
-      samplesAcc = 0;
-      samplesCount = 0;
+      if (published) {
+        samplesAcc = 0;
+        samplesCount = 0;
+        lastSend = millis();
+      }
     }
   }
 }
