@@ -1,7 +1,6 @@
 #include <Arduino.h>
 
 #include <EEPROM.h>
-#include <MQTT.h>
 #include <PubSubClient.h>
 #include <WiFiManager.h>
 #include <ESP8266WiFi.h>
@@ -193,7 +192,7 @@ void setupMQTT() {
   Serial.println(":" + String(eeprom_data.mqtt_port) + " ...");
   
   IPAddress server(192, 168, 2, 100);
-  client.setServer("farmer.cloudmqtt.com", 18762);
+  client.setServer(server, 1883);
   client.setCallback(mqttCallback);
 }
 
@@ -204,9 +203,9 @@ bool reconnect() {
 
     Serial.println("Reconnect as " + client_id);
 
-    if (client.connect(client_id.c_str(), "baoamsvm", "xw-PGPkL4Jw-")) {
-      //String config = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\", \"name\": \"" + device_name + "\", \"unit_of_measurement\": \"W\"}";
-      //client.publish(power_config_topic.c_str(), config.c_str());
+    if (client.connect(client_id.c_str())) {
+      String config = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\", \"name\": \"" + device_name + "\", \"unit_of_measurement\": \"W\"}";
+      client.publish(power_config_topic.c_str(), config.c_str());
       String payload = "online";
       client.publish(availability_topic.c_str(), payload.c_str());
 
@@ -226,7 +225,7 @@ void setup() {
   writeSettingsESP();
 
   setupMQTT();
-  // setupOTA();
+  setupOTA();
   
   emon1.current(A0, 10);             // Current: input pin, calibration.
 
@@ -235,15 +234,24 @@ void setup() {
 
 int samples = 0;
 bool lockSending = true;
-int publishInterval = 5 * 1000;
+int publishInterval = 3 * 1000;
 int lastSend = 0;
 double samplesAcc;
 int samplesCount = 0;
+long lastMeasurement;
+double Irms;
+double consumption;
 
 void loop() {
-  // ArduinoOTA.handle();
-  double Irms = emon1.calcIrms(1480);
-  double consumption = Irms * 234.0;
+  ArduinoOTA.handle();
+
+  long now = millis();
+  if (now - lastMeasurement > 300) {
+    Irms = emon1.calcIrms(1480);
+    lastMeasurement = now;
+  }
+  
+  consumption = Irms * 234.0;
   if (!client.connected()) {
       reconnect();
   }
