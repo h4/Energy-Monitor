@@ -5,11 +5,11 @@
 #include <WiFiManager.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <EmonLib.h>             // Include Emon Library
-
-#undef  MQTT_MAX_PACKET_SIZE
-#define MQTT_MAX_PACKET_SIZE 512
 
 #define EEPROM_START 0
 
@@ -196,6 +196,16 @@ void setupMQTT() {
   client.setCallback(mqttCallback);
 }
 
+void publish_config() {
+  String config_message = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\", \"name\": \"" + device_name + "\", \"unit_of_measurement\": \"W\"}";
+  bool result = client.publish(power_config_topic.c_str(), config_message.c_str());
+  if (!result) {
+    Serial.println("Can not publish config message");
+  }
+  String payload = "online";
+  client.publish(availability_topic.c_str(), payload.c_str());
+}
+
 bool reconnect() {
   while (!client.connected()) {
     String client_id = device_name + "_";
@@ -204,10 +214,7 @@ bool reconnect() {
     Serial.println("Reconnect as " + client_id);
 
     if (client.connect(client_id.c_str())) {
-      String config = "{\"state_topic\": \"" + power_state_topic + "\", \"device_class\": \"power\", \"name\": \"" + device_name + "\", \"unit_of_measurement\": \"W\"}";
-      client.publish(power_config_topic.c_str(), config.c_str());
-      String payload = "online";
-      client.publish(availability_topic.c_str(), payload.c_str());
+      publish_config();
 
       Serial.println("Reconnected...");
     } else {
@@ -227,7 +234,7 @@ void setup() {
   setupMQTT();
   setupOTA();
   
-  emon1.current(A0, 10);             // Current: input pin, calibration.
+  emon1.current(A0, 26);
 
   Serial.println("Setup completed");
 }
@@ -235,7 +242,9 @@ void setup() {
 int samples = 0;
 bool lockSending = true;
 int publishInterval = 3 * 1000;
+int publishConfigInterval = 60 * 1000;
 int lastSend = 0;
+int lastSeen = 0;
 double samplesAcc;
 int samplesCount = 0;
 long lastMeasurement;
@@ -251,7 +260,7 @@ void loop() {
     lastMeasurement = now;
   }
   
-  consumption = Irms * 234.0;
+  consumption = Irms * 232.0;
   if (!client.connected()) {
       reconnect();
   }
@@ -266,7 +275,7 @@ void loop() {
     return;
   }
 
-  if (millis() - lastSend < publishInterval) {
+  if (now - lastSend < publishInterval) {
     samplesAcc += consumption;
     samplesCount += 1;
   } else {
@@ -284,8 +293,15 @@ void loop() {
       if (published) {
         samplesAcc = 0;
         samplesCount = 0;
-        lastSend = millis();
+        lastSend = now;
       }
+    }
+  }
+
+  if (now - lastSeen > publishConfigInterval) {
+    if (client.connected()) {
+      publish_config();
+      lastSeen = now;
     }
   }
 }
